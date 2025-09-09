@@ -1,59 +1,48 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# # Gemma3-4b fine-tune for supplements label OCR-VQA
-
-# In[1]:
-
+#Gemma3-4b fine-tune for supplements label OCR-VQA
 
 #%pip install torch tensorboard
 #%pip install transformers datasets accelerate evaluate trl protobuf sentencepiece
-#%pip install flash-attn
 #%pip install accelerate peft
-
-
-# In[2]:
-
-
 #%pip install tf-keras
-
-
-# In[3]:
-
-
-import os
-
-
-# In[4]:
-
-
-hf_token = os.getenv('HF_TOKEN')
-
-
-# In[5]:
-
-
-#%env HF_HOME=/local/scratch/crowelenn-aiml339/
-
-
-# In[6]:
-
-
-base_model = "google/gemma-3-4b-it"
-checkpoint_dir = "/local/scratch/crowelenn-aiml339/checkpoints"
-learning_rate = 5e-5
-
-
-# Tensorboard setup
-
-# In[7]:
-
-
 #%pip install tensorboard
 
+import os
+import json, random
+import torch
+from torch.utils.data import random_split
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms
+from transformers import AutoProcessor, AutoModelForImageTextToText
+from peft import LoraConfig, get_peft_model
+from accelerate import Accelerator
+from torch.utils.tensorboard import SummaryWriter
+from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+from transformers import AutoConfig, AutoModelForImageTextToText
+from torch.utils.data import DataLoader
+from peft import LoraConfig
+from torch.nn import CrossEntropyLoss
+from bitsandbytes.optim import AdamW8bit
+from dotenv import load_dotenv
 
-# In[8]:
+load_dotenv()
 
+hf_token = os.getenv('HF_TOKEN')
+hf_home  = os.getenv('HF_HOME')
+data_dir = os.getenv('DATA_DIR')
+checkpoint_dir = os.getenv('CHECKPOINT_DIR') # "/local/scratch/crowelenn-aiml339/checkpoints"
+
+if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None:
+    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR must be set.")
+
+dataset_path = os.path.join(data_dir, "output", "output.jsonl")
+images_path  = os.path.join(data_dir, "data", "images")
+
+base_model = "google/gemma-3-4b-it"
+learning_rate = 5e-5
 
 system_message = "You are a quality control robot responsible for monitoring the quality of supplement labels."
 user_prompt = """Using primarily the text contained in the attached label supplement image, answer the list of questions in the <QUESTIONS> tags.
@@ -65,10 +54,6 @@ Answer concisely in a JSON format with no preamble, allowing the response to eas
 
 <QUESTIONS>
 """
-
-
-# In[9]:
-
 
 def format_data(sample):
     return {
@@ -83,9 +68,6 @@ def format_data(sample):
                     {
                         "type": "text",
                         "text": sample["questions"]
-                        #"text": user_prompt.format(
-                        #    questions=sample["questions"]
-                        #),
                     },
                     {
                         "type": "image",
@@ -101,13 +83,6 @@ def format_data(sample):
     }
 
 
-# In[17]:
-
-
-import json, random
-from PIL import Image
-from torch.utils.data import Dataset
-from torchvision import transforms
 
 class OCRVQADataset(Dataset):
     def __init__(self, jsonl_file, transform=None, min_q=1, max_q=4):
@@ -124,7 +99,7 @@ class OCRVQADataset(Dataset):
         sample = self.samples[idx]
 
         # Keep as PIL so process_vision_info works later
-        image_path = "../../AIML339/supplements_small/images/" + sample["image"]
+        image_path = os.path.join(images_path, sample["image"])
         image = Image.open(image_path).convert("RGB")
 
         qa_pairs = sample["qas"]
@@ -144,10 +119,6 @@ class OCRVQADataset(Dataset):
             "questions": questions_str,
             "answers": answers_str
         }
-
-
-# In[18]:
-
 
 def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     image_inputs = []
@@ -169,18 +140,7 @@ def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     return image_inputs
 
 
-# In[19]:
-
-
-dataset_path = r'../../AIML339/supplements_small/output.jsonl'
 dataset_obj = OCRVQADataset(dataset_path)
-
-
-# In[20]:
-
-
-import torch
-from torch.utils.data import random_split
 
 # Set split sizes
 total_size = len(dataset_obj)
@@ -191,10 +151,6 @@ test_size = total_size - train_size - val_size
 # Use a generator with a manual seed for reproducibility
 generator = torch.Generator().manual_seed(42)
 
-
-# In[21]:
-
-
 train_dataset, val_dataset, test_dataset = random_split(
     dataset_obj, [train_size, val_size, test_size], generator=generator
 )
@@ -204,44 +160,21 @@ train_dataset_fmt = [format_data(sample) for sample in train_dataset]
 print(train_dataset_fmt[100])
 
 
-# In[32]:
 
-
-from transformers import AutoProcessor, AutoModelForImageTextToText
-from peft import LoraConfig, get_peft_model
-from accelerate import Accelerator
-from torch.utils.tensorboard import SummaryWriter
 
 accelerator = Accelerator(mixed_precision="bf16")
 writer = SummaryWriter(log_dir="./logs")
 
-# Hugging Face model id
-model_id = "google/gemma-3-4b-it"
-
-# Check if GPU benefits from bfloat16
-#if torch.cuda.get_device_capability()[0] < 8:
-#    raise ValueError("GPU does not support bfloat16, please use a GPU that supports bfloat16.")
-
-# Define model init arguments
-#model_kwargs = dict(
-#    attn_implementation="eager", # Use "flash_attention_2" when running on Ampere or newer GPU
-#    torch_dtype=torch.bfloat16 # What torch dtype to use, defaults to auto
-#)
-
-#model = AutoModelForImageTextToText.from_pretrained(model_id, **model_kwargs)
 
 
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForImageTextToText
-
-config = AutoConfig.from_pretrained(model_id)
+config = AutoConfig.from_pretrained(base_model)
 
 with init_empty_weights():
     model = AutoModelForImageTextToText.from_config(config)
 
 model = load_checkpoint_and_dispatch(
     model,
-    model_id,
+    base_model,
     device_map="auto",
     no_split_module_classes=["GemmaDecoderLayer"],  # or model-specific layers
     dtype=torch.bfloat16
@@ -254,18 +187,10 @@ model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
 
-
-# In[31]:
-
-
 print("Visible devices:", accelerator.state.num_processes)
 print("Local device:", accelerator.device)
 
 
-# In[25]:
-
-
-from peft import LoraConfig
 
 peft_config = LoraConfig(
     lora_alpha=16,
@@ -278,10 +203,6 @@ peft_config = LoraConfig(
 )
 
 model = get_peft_model(model, peft_config)
-
-
-# In[26]:
-
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
@@ -317,10 +238,6 @@ def collate_fn(examples):
     return batch  # keep on CPU, Accelerator will move to GPU
 
 
-# In[27]:
-
-
-from torch.utils.data import DataLoader
 
 train_dataloader = DataLoader(
     train_dataset_fmt,
@@ -330,26 +247,16 @@ train_dataloader = DataLoader(
 )
 
 
-# In[28]:
 
-from bitsandbytes.optim import AdamW8bit
 optimizer = AdamW8bit(model.parameters(), lr=2e-4)
 
 #optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-
-
-# In[29]:
-
 
 model, optimizer, train_dataloader = accelerator.prepare(
     model, optimizer, train_dataloader
 )
 
 
-# In[30]:
-
-
-from torch.nn import CrossEntropyLoss
 
 loss_fn = CrossEntropyLoss()
 num_epochs = 1
@@ -379,9 +286,6 @@ for epoch in range(num_epochs):
     accelerator.wait_for_everyone()
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.save_pretrained(f"gemma-supplements-small/epoch{epoch+1}")
-
-
-# In[ ]:
 
 
 accelerator.wait_for_everyone()
