@@ -34,9 +34,21 @@ hf_token = os.getenv('HF_TOKEN')
 hf_home  = os.getenv('HF_HOME')
 data_dir = os.getenv('DATA_DIR')
 checkpoint_dir = os.getenv('CHECKPOINT_DIR') # "/local/scratch/crowelenn-aiml339/checkpoints"
+logs_dir = os.getenv('LOGS_DIR')
 
-if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None:
-    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR must be set.")
+if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None or logs_dir is None:
+    if hf_token is None:
+        print("HF_TOKEN is null")
+    if hf_home is None:
+        print("HF_HOME is null")
+    if data_dir is None:
+        print("DATA_DIR is null")
+    if checkpoint_dir is None:
+        print("CHECKPOINT_DIR is null")
+    if logs_dir is None:
+        print("LOGS_DIR is null")
+    
+    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR, LOGS_DIR must be set.")
 
 print(hf_home)
 
@@ -162,7 +174,7 @@ train_dataset_fmt = [format_data(sample) for sample in train_dataset]
 print(train_dataset_fmt[100])
 
 accelerator = Accelerator(mixed_precision="bf16")
-writer = SummaryWriter(log_dir="./logs")
+writer = SummaryWriter(log_dir=logs_dir)
 
 model = AutoModelForImageTextToText.from_pretrained(
     base_model,
