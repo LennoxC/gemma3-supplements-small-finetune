@@ -168,6 +168,7 @@ train_dataset, val_dataset, test_dataset = random_split(
 )
 
 train_dataset_fmt = [format_data(sample) for sample in train_dataset]
+val_dataset_fmt = [format_data(sample) for sample in val_dataset]
 
 print(train_dataset_fmt[100])
 
@@ -234,28 +235,35 @@ def collate_fn(examples):
 
 train_dataloader = DataLoader(
     train_dataset_fmt,
-    batch_size=1,
+    batch_size=2,
+    shuffle=True,
+    collate_fn=collate_fn,
+)
+
+val_dataloader = DataLoader(
+    val_dataset_fmt,
+    batch_size=2,
     shuffle=True,
     collate_fn=collate_fn,
 )
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
 
-model, optimizer, train_dataloader = accelerator.prepare(
-    model, optimizer, train_dataloader
+model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, val_dataloader
 )
 
 
 loss_fn = torch.nn.CrossEntropyLoss()
 num_epochs = 3
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 4
 
 global_step = 0
 log_every = 2  # steps for scalar logging
 sample_every = 2  # steps for logging sample responses
 
 model.train()
-val_every = 50  # run validation every N steps
+val_every = 25  # run validation every N steps
 
 for epoch in range(num_epochs):
     for step, batch in enumerate(train_dataloader):
@@ -285,15 +293,9 @@ for epoch in range(num_epochs):
                         batch_loss = outputs.loss if hasattr(outputs, "loss") else loss_fn(outputs.logits, val_batch["labels"])
                         val_loss += batch_loss.item()
 
-                        preds = outputs.logits.argmax(dim=-1)
-                        val_correct += (preds == val_batch["labels"]).sum().item()
-                        val_total += val_batch["labels"].numel()
-
                 avg_val_loss = val_loss / len(val_dataloader)
-                val_accuracy = val_correct / val_total
 
                 writer.add_scalar("eval/loss", avg_val_loss, global_step)
-                writer.add_scalar("eval/accuracy", val_accuracy, global_step)
 
                 model.train()  # switch back
 
