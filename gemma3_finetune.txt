@@ -1,50 +1,21 @@
-#!/usr/bin/env python
-# coding: utf-8
+%pip install torch tensorboard
+%pip install transformers datasets accelerate evaluate trl protobuf sentencepiece
+%pip install flash-attn
+%pip install accelerate peft
 
-#Gemma3-4b fine-tune for supplements label OCR-VQA
-
-#%pip install torch tensorboard
-#%pip install transformers datasets accelerate evaluate trl protobuf sentencepiece
-#%pip install accelerate peft
-#%pip install tf-keras
-#%pip install tensorboard
+%pip install tf-keras
 
 import os
-import json, random
-import torch
-from torch.utils.data import random_split
-from PIL import Image
-from torch.utils.data import Dataset
-from torchvision import transforms
-from transformers import AutoProcessor, AutoModelForImageTextToText
-from peft import LoraConfig, get_peft_model
-from accelerate import Accelerator
-from torch.utils.tensorboard import SummaryWriter
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForImageTextToText
-from torch.utils.data import DataLoader
-from peft import LoraConfig
-from torch.nn import CrossEntropyLoss
-from bitsandbytes.optim import AdamW8bit
-from dotenv import load_dotenv
-
-load_dotenv()
 
 hf_token = os.getenv('HF_TOKEN')
-hf_home  = os.getenv('HF_HOME')
-data_dir = os.getenv('DATA_DIR')
-checkpoint_dir = os.getenv('CHECKPOINT_DIR') # "/local/scratch/crowelenn-aiml339/checkpoints"
 
-if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None:
-    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR must be set.")
-
-print(hf_home)
-
-dataset_path = os.path.join(data_dir, "output.jsonl")
-images_path  = os.path.join(data_dir, "images")
+%env HF_HOME=/local/scratch/crowelenn-aiml339/
 
 base_model = "google/gemma-3-4b-it"
+checkpoint_dir = "/local/scratch/crowelenn-aiml339/checkpoints"
 learning_rate = 5e-5
+
+%pip install tensorboard
 
 system_message = "You are a quality control robot responsible for monitoring the quality of supplement labels."
 user_prompt = """Using primarily the text contained in the attached label supplement image, answer the list of questions in the <QUESTIONS> tags.
@@ -70,6 +41,9 @@ def format_data(sample):
                     {
                         "type": "text",
                         "text": sample["questions"]
+                        #"text": user_prompt.format(
+                        #    questions=sample["questions"]
+                        #),
                     },
                     {
                         "type": "image",
@@ -84,7 +58,10 @@ def format_data(sample):
         ],
     }
 
-
+import json, random
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms
 
 class OCRVQADataset(Dataset):
     def __init__(self, jsonl_file, transform=None, min_q=1, max_q=4):
@@ -101,7 +78,7 @@ class OCRVQADataset(Dataset):
         sample = self.samples[idx]
 
         # Keep as PIL so process_vision_info works later
-        image_path = os.path.join(images_path, sample["image"])
+        image_path = "AIML339/supplements_small/images/" + sample["image"]
         image = Image.open(image_path).convert("RGB")
 
         qa_pairs = sample["qas"]
@@ -142,7 +119,11 @@ def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     return image_inputs
 
 
+dataset_path = r'AIML339/supplements_small/output.jsonl'
 dataset_obj = OCRVQADataset(dataset_path)
+
+import torch
+from torch.utils.data import random_split
 
 # Set split sizes
 total_size = len(dataset_obj)
@@ -161,15 +142,29 @@ train_dataset_fmt = [format_data(sample) for sample in train_dataset]
 
 print(train_dataset_fmt[100])
 
+from transformers import AutoProcessor, AutoModelForImageTextToText
+from peft import LoraConfig, get_peft_model
+from accelerate import Accelerator
+from torch.utils.tensorboard import SummaryWriter
+
 accelerator = Accelerator(mixed_precision="bf16")
 writer = SummaryWriter(log_dir="./logs")
 
-model = AutoModelForImageTextToText.from_pretrained(
-    base_model,
-    torch_dtype=torch.bfloat16
+# Hugging Face model id
+model_id = "google/gemma-3-4b-it" # or `google/gemma-3-12b-pt`, `google/gemma-3-27-pt`
+
+# Check if GPU benefits from bfloat16
+#if torch.cuda.get_device_capability()[0] < 8:
+#    raise ValueError("GPU does not support bfloat16, please use a GPU that supports bfloat16.")
+
+# Define model init arguments
+model_kwargs = dict(
+    attn_implementation="eager", # Use "flash_attention_2" when running on Ampere or newer GPU
+    torch_dtype=torch.bfloat16 # What torch dtype to use, defaults to auto
 )
 
-#model.config.max_position_embeddings = 1024
+# Load model and tokenizer
+model = AutoModelForImageTextToText.from_pretrained(model_id, **model_kwargs)
 
 model.config.use_cache = False
 
@@ -177,6 +172,8 @@ processor = AutoProcessor.from_pretrained(base_model)
 
 print("Visible devices:", accelerator.state.num_processes)
 print("Local device:", accelerator.device)
+
+from peft import LoraConfig
 
 peft_config = LoraConfig(
     lora_alpha=16,
@@ -190,6 +187,35 @@ peft_config = LoraConfig(
 
 model = get_peft_model(model, peft_config)
 
+'''
+from trl import SFTConfig
+
+args = SFTConfig(
+    output_dir="gemma-supplements-small",       # directory to save and repository id
+    num_train_epochs=1,                         # number of training epochs
+    per_device_train_batch_size=1,              # batch size per device during training
+    gradient_accumulation_steps=4,              # number of steps before performing a backward/update pass
+    gradient_checkpointing=True,                # use gradient checkpointing to save memory
+    optim="adamw_torch_fused",                  # use fused adamw optimizer
+    logging_dir="./logs",                       # tensorboard output
+    logging_steps=5,                            # log every 5 steps
+    save_strategy="epoch",                      # save checkpoint every epoch
+    learning_rate=2e-4,                         # learning rate, based on QLoRA paper
+    bf16=True,                                  # use bfloat16 precision
+    max_grad_norm=0.3,                          # max gradient norm based on QLoRA paper
+    warmup_ratio=0.03,                          # warmup ratio based on QLoRA paper
+    lr_scheduler_type="constant",               # use constant learning rate scheduler
+    push_to_hub=True,                           # push model to hub
+    report_to="tensorboard",                    # report metrics to tensorboard
+    gradient_checkpointing_kwargs={
+        "use_reentrant": False
+    },  # use reentrant checkpointing
+    dataset_text_field="",                      # need a dummy field for collator
+    dataset_kwargs={"skip_prepare_dataset": True},  # important for collator
+)
+args.remove_unused_columns = False # important for collator
+#args.dataloader_pin_memory = False
+'''
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
     texts, images = [], []
@@ -201,14 +227,7 @@ def collate_fn(examples):
         texts.append(text.strip())
         images.append(image_inputs)
 
-    batch = processor(
-        text=texts,
-        images=images,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512
-    )
+    batch = processor(text=texts, images=images, return_tensors="pt", padding=True)
 
     labels = batch["input_ids"].clone()
     image_token_id = [
@@ -223,7 +242,7 @@ def collate_fn(examples):
 
     return batch  # keep on CPU, Accelerator will move to GPU
 
-
+from torch.utils.data import DataLoader
 
 train_dataloader = DataLoader(
     train_dataset_fmt,
@@ -232,17 +251,13 @@ train_dataloader = DataLoader(
     collate_fn=collate_fn,
 )
 
-
-
-#optimizer = AdamW8bit(model.parameters(), lr=2e-4)
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
 
 model, optimizer, train_dataloader = accelerator.prepare(
     model, optimizer, train_dataloader
 )
 
-
+from torch.nn import CrossEntropyLoss
 
 loss_fn = CrossEntropyLoss()
 num_epochs = 1
@@ -273,9 +288,7 @@ for epoch in range(num_epochs):
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.save_pretrained(f"gemma-supplements-small/epoch{epoch+1}")
 
-
 accelerator.wait_for_everyone()
 unwrapped_model = accelerator.unwrap_model(model)
 unwrapped_model.save_pretrained("gemma-supplements-small/final")
 writer.close()
-
