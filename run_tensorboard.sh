@@ -1,4 +1,4 @@
 #!/bin/bash
 
 source .env
-tensorboard --logdir=$LOGS_DIR --port=$1
+tensorboard --logdir=$LOGS_HOME --port=$1

@@ -3,12 +3,6 @@
 
 #Gemma3-4b fine-tune for supplements label OCR-VQA
 
-#%pip install torch tensorboard
-#%pip install transformers datasets accelerate evaluate trl protobuf sentencepiece
-#%pip install accelerate peft
-#%pip install tf-keras
-#%pip install tensorboard
-
 import os
 import json, random
 import torch
@@ -35,8 +29,9 @@ hf_home  = os.getenv('HF_HOME')
 data_dir = os.getenv('DATA_DIR')
 checkpoint_dir = os.getenv('CHECKPOINT_DIR') # "/local/scratch/crowelenn-aiml339/checkpoints"
 logs_dir = os.getenv('LOGS_DIR')
+run_name = os.getenv('RUN_NAME')
 
-if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None or logs_dir is None:
+if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None or logs_dir is None or run_name is None:
     if hf_token is None:
         print("HF_TOKEN is null")
     if hf_home is None:
@@ -47,13 +42,16 @@ if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is 
         print("CHECKPOINT_DIR is null")
     if logs_dir is None:
         print("LOGS_DIR is null")
+    if run_name is None:
+        print("RUN_NAME is null")
     
-    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR, LOGS_DIR must be set.")
+    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR, LOGS_DIR, RUN_NAME must be set.")
 
 print(hf_home)
 
 dataset_path = os.path.join(data_dir, "output.jsonl")
 images_path  = os.path.join(data_dir, "images")
+logs_dir = os.path.join(logs_dir, run_name)
 
 base_model = "google/gemma-3-4b-it"
 learning_rate = 5e-5
@@ -181,8 +179,6 @@ model = AutoModelForImageTextToText.from_pretrained(
     torch_dtype=torch.bfloat16
 )
 
-#model.config.max_position_embeddings = 1024
-
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
@@ -233,8 +229,7 @@ def collate_fn(examples):
     labels[labels == 262144] = -100
     batch["labels"] = labels
 
-    return batch  # keep on CPU, Accelerator will move to GPU
-
+    return batch
 
 
 train_dataloader = DataLoader(
@@ -244,10 +239,6 @@ train_dataloader = DataLoader(
     collate_fn=collate_fn,
 )
 
-
-
-#optimizer = AdamW8bit(model.parameters(), lr=2e-4)
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
 
 model, optimizer, train_dataloader = accelerator.prepare(
@@ -255,21 +246,23 @@ model, optimizer, train_dataloader = accelerator.prepare(
 )
 
 
-
-loss_fn = CrossEntropyLoss()
-num_epochs = 1
-gradient_accumulation_steps = 4
+loss_fn = torch.nn.CrossEntropyLoss()
+num_epochs = 3
+gradient_accumulation_steps = 8
 
 global_step = 0
+log_every = 2  # steps for scalar logging
+sample_every = 2  # steps for logging sample responses
 
 model.train()
+val_every = 50  # run validation every N steps
+
 for epoch in range(num_epochs):
     for step, batch in enumerate(train_dataloader):
         outputs = model(**batch)
         loss = outputs.loss if hasattr(outputs, "loss") else loss_fn(outputs.logits, batch["labels"])
-
-        # Scale loss if using gradient accumulation
         loss = loss / gradient_accumulation_steps
+
         accelerator.backward(loss)
 
         if (step + 1) % gradient_accumulation_steps == 0:
@@ -277,15 +270,35 @@ for epoch in range(num_epochs):
             optimizer.zero_grad()
             global_step += 1
 
-            # Log to TensorBoard
-            writer.add_scalar("train/loss", loss.item() * gradient_accumulation_steps, global_step)
+            # ---- Training Scalars ----
+            if global_step % log_every == 0:
+                writer.add_scalar("train/loss", loss.item() * gradient_accumulation_steps, global_step)
 
-    # Optional: save checkpoint at epoch end
-    accelerator.wait_for_everyone()
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.save_pretrained(f"gemma-supplements-small/epoch{epoch+1}")
+            # ---- Validation Mid-Epoch ----
+            if global_step % val_every == 0:
+                model.eval()
+                val_loss, val_correct, val_total = 0, 0, 0
+
+                with torch.no_grad():
+                    for val_batch in val_dataloader:
+                        outputs = model(**val_batch)
+                        batch_loss = outputs.loss if hasattr(outputs, "loss") else loss_fn(outputs.logits, val_batch["labels"])
+                        val_loss += batch_loss.item()
+
+                        preds = outputs.logits.argmax(dim=-1)
+                        val_correct += (preds == val_batch["labels"]).sum().item()
+                        val_total += val_batch["labels"].numel()
+
+                avg_val_loss = val_loss / len(val_dataloader)
+                val_accuracy = val_correct / val_total
+
+                writer.add_scalar("eval/loss", avg_val_loss, global_step)
+                writer.add_scalar("eval/accuracy", val_accuracy, global_step)
+
+                model.train()  # switch back
 
 
+# SAVE THE MODEL
 accelerator.wait_for_everyone()
 unwrapped_model = accelerator.unwrap_model(model)
 unwrapped_model.save_pretrained("gemma-supplements-small/final")
