@@ -21,8 +21,11 @@ from peft import LoraConfig
 from torch.nn import CrossEntropyLoss
 from bitsandbytes.optim import AdamW8bit
 from dotenv import load_dotenv
+from prompt_loader import PromptLoader
 
 load_dotenv()
+
+prompts = PromptLoader()
 
 hf_token = os.getenv('HF_TOKEN')
 hf_home  = os.getenv('HF_HOME')
@@ -56,16 +59,8 @@ logs_dir = os.path.join(logs_dir, run_name)
 base_model = "google/gemma-3-4b-it"
 learning_rate = 5e-5
 
-system_message = "You are a quality control robot responsible for monitoring the quality of supplement labels."
-user_prompt = """Using primarily the text contained in the attached label supplement image, answer the list of questions in the <QUESTIONS> tags.
-Answer concisely in a JSON format with no preamble, allowing the response to easily be parsed. An example response would be:
-{
-  "brand": "label supplelments co",
-  "contents": 120
-}
-
-<QUESTIONS>
-"""
+system_message = prompts.get_prompt("system")
+user_prompt = prompts.get_prompt("user")
 
 def format_data(sample):
     return {
@@ -114,22 +109,34 @@ class OCRVQADataset(Dataset):
         image_path = os.path.join(images_path, sample["image"])
         image = Image.open(image_path).convert("RGB")
 
-        qa_pairs = sample["qas"]
+        # filter out invalid/missing answers
+        qa_pairs = [
+            p for p in sample["qas"]
+            if p.get("a") not in (None, "", float("nan"))  # works for None, empty, NaN
+            and not (isinstance(p.get("a"), float) and np.isnan(p["a"]))  # strict NaN check
+        ]
+
+        if not qa_pairs:
+            return None  
+
         k = random.randint(self.min_q, min(self.max_q, len(qa_pairs)))
         chosen_pairs = random.sample(qa_pairs, k)
 
         questions_str = (
             user_prompt
-            + "; ".join(f"Question: {p['q']} This corresponds to JSON key {p['k']}" for p in chosen_pairs)
+            + "; ".join(
+                f'Question: "{prompts.get_prompt(p["q"])}" This corresponds to JSON key "{p["k"]}"'
+                for p in chosen_pairs
+            )
             + "</QUESTIONS>"
         )
         answers_dict = {p['k']: p['a'] for p in chosen_pairs}
         answers_str = json.dumps(answers_dict, ensure_ascii=False)
-
+    
         return {
             "image": image,  # PIL
             "questions": questions_str,
-            "answers": answers_str
+            "answers": answers_str,
         }
 
 def process_vision_info(messages: list[dict]) -> list[Image.Image]:
@@ -171,6 +178,9 @@ train_dataset_fmt = [format_data(sample) for sample in train_dataset]
 val_dataset_fmt = [format_data(sample) for sample in val_dataset]
 
 print(train_dataset_fmt[100])
+
+# pause before training for dataset testing
+#exit("test complete")
 
 accelerator = Accelerator(mixed_precision="bf16")
 writer = SummaryWriter(log_dir=logs_dir)
