@@ -1,0 +1,1 @@
+What is product serving size? If multiple values are stated, answer the first numeric serving size provided. Provide only a number: integer, or floating point to two decimal places.

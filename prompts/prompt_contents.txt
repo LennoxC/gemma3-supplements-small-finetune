@@ -1,0 +1,1 @@
+What is the the net contents? If multiple values are stated, provide the first value with a metric unit (mL, g, kg, gram, mcg, mg), otherwise the first numeric contents value on the label. Provide only a number: integer, or floating point to two decimal places.
