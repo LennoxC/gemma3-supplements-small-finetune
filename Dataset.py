@@ -5,6 +5,9 @@ from torchvision import transforms
 import os
 from prompt_loader import PromptLoader
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
 
 prompts = PromptLoader()
 system_message = prompts.get_prompt("system")

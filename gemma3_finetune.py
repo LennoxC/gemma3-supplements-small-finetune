@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import random_split
 from PIL import Image
 from torchvision import transforms
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForImageTextToText, AutoTokenizer
 from transformers import get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model
 from accelerate import Accelerator
@@ -19,6 +19,7 @@ from peft import LoraConfig
 from dotenv import load_dotenv
 from prompt_loader import PromptLoader
 import numpy as np
+import deepspeed
 
 # ==================== ENVIRONMENT SETUP ====================
 
@@ -92,6 +93,8 @@ model = AutoModelForImageTextToText.from_pretrained(
     base_model,
     torch_dtype=torch.bfloat16
 )
+tokenizer = AutoTokenizer.from_pretrained(base_model)
+
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
@@ -144,18 +147,26 @@ val_dataloader = DataLoader(
 peft_config = LoraConfig(
     lora_alpha=16,
     lora_dropout=0.05,
-    r=16,
+    r=64,
     bias="none",
-    target_modules="all-linear",
-    task_type="CAUSAL_LM",
-    modules_to_save=["lm_head", "embed_tokens"],
+    target_modules=[
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj"],
+    task_type="CAUSAL_LM"
 )
 
 model = get_peft_model(model, peft_config)
 
+model.print_trainable_parameters()
+
 # ================ Training Loop ================
 # Params:
-max_steps = 50
+max_steps = 4
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
@@ -222,8 +233,19 @@ while global_step < max_steps:
 
 # ============ SAVE THE MODEL ============
 accelerator.wait_for_everyone()
-unwrapped_model = accelerator.unwrap_model(model)
 
-unwrapped_model.save_pretrained(f"{save_dir}/{run_name}")
+output_dir = f"{save_dir}/{run_name}"
+
+#unwrapped_model = accelerator.unwrap_model(model)
+
+#unwrapped_model.save_pretrained(output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save)
+
+with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
+    if accelerator.is_main_process:
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        processor.save_pretrained(output_dir)
+
+
 writer.close()
 
