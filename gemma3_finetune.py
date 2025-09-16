@@ -166,7 +166,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 4
+max_steps = 101
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
@@ -236,11 +236,7 @@ accelerator.wait_for_everyone()
 
 output_dir = f"{save_dir}/{run_name}"
 
-#unwrapped_model = accelerator.unwrap_model(model)
-
-#unwrapped_model.save_pretrained(output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save)
-
-with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
+with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)): # required to prevent empty LoRA layers being saved
     if accelerator.is_main_process:
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
