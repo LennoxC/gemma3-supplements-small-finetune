@@ -8,179 +8,82 @@ import json, random
 import torch
 from torch.utils.data import random_split
 from PIL import Image
-from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model
 from accelerate import Accelerator
 from torch.utils.tensorboard import SummaryWriter
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForImageTextToText
 from torch.utils.data import DataLoader
 from peft import LoraConfig
-from torch.nn import CrossEntropyLoss
-from bitsandbytes.optim import AdamW8bit
 from dotenv import load_dotenv
 from prompt_loader import PromptLoader
+import numpy as np
 
-load_dotenv()
+# ==================== ENVIRONMENT SETUP ====================
 
-prompts = PromptLoader()
+Image.MAX_IMAGE_PIXELS = None # disable decompression bomb warning on PIL images
 
-hf_token = os.getenv('HF_TOKEN')
-hf_home  = os.getenv('HF_HOME')
-data_dir = os.getenv('DATA_DIR')
-checkpoint_dir = os.getenv('CHECKPOINT_DIR') # "/local/scratch/crowelenn-aiml339/checkpoints"
-logs_dir = os.getenv('LOGS_DIR')
-run_name = os.getenv('RUN_NAME')
+load_dotenv() # load environmental variables
 
-if hf_token is None or hf_home is None or data_dir is None or checkpoint_dir is None or logs_dir is None or run_name is None:
-    if hf_token is None:
-        print("HF_TOKEN is null")
-    if hf_home is None:
-        print("HF_HOME is null")
-    if data_dir is None:
-        print("DATA_DIR is null")
-    if checkpoint_dir is None:
-        print("CHECKPOINT_DIR is null")
-    if logs_dir is None:
-        print("LOGS_DIR is null")
-    if run_name is None:
-        print("RUN_NAME is null")
-    
-    exit("Environmental Variables HF_TOKEN, HF_HOME, DATA_DIR, CHECKPOINT_DIR, LOGS_DIR, RUN_NAME must be set.")
+prompts = PromptLoader() # create the prompts loader class. This loads the prompts from the /prompts directory. These are tracked with git.
 
-print(hf_home)
+# === environmental variables ===
 
-dataset_path = os.path.join(data_dir, "output.jsonl")
+hf_token = os.getenv('HF_TOKEN') # load the hugging face token. This must have read/write access.
+hf_home  = os.getenv('HF_HOME') # home directory for model checkpoints
+data_dir = os.getenv('DATA_DIR') # where to load the images/jsonl file from
+checkpoint_dir = os.getenv('CHECKPOINT_DIR') # checkpoints are saved here. Use a location with plenty of storage
+logs_dir = os.getenv('LOGS_DIR') # logs are outputted here. Store near the checkpoints for tidyness
+run_name = os.getenv('RUN_NAME') # name of this experiment
+
+# check all the environmental variables are set
+env_vars = {
+    "HF_TOKEN": hf_token,
+    "HF_HOME": hf_home,
+    "DATA_DIR": data_dir,
+    "CHECKPOINT_DIR": checkpoint_dir,
+    "LOGS_DIR": logs_dir,
+    "RUN_NAME": run_name
+}
+missing = [name for name, value in env_vars.items() if value is None]
+
+if missing:
+    for name in missing:
+        print(f"{name} is null")
+    exit("Environmental Variables " + ", ".join(env_vars.keys()) + " must be set.")
+
+# === Variables for the project ===
+
+dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 images_path  = os.path.join(data_dir, "images")
 logs_dir = os.path.join(logs_dir, run_name)
 
 base_model = "google/gemma-3-4b-it"
-learning_rate = 5e-5
+save_dir = "finetunes"
 
 system_message = prompts.get_prompt("system")
 user_prompt = prompts.get_prompt("user")
 
-def format_data(sample):
-    return {
-        "messages": [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": system_message}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": sample["questions"]
-                    },
-                    {
-                        "type": "image",
-                        "image": sample["image"],
-                    },
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": sample["answers"]}],
-            },
-        ],
-    }
-
-
-
-class OCRVQADataset(Dataset):
-    def __init__(self, jsonl_file, transform=None, min_q=1, max_q=4):
-        with open(jsonl_file, 'r') as f:
-            self.samples = [json.loads(line) for line in f]
-        self.transform = transform or transforms.ToTensor()
-        self.min_q = min_q
-        self.max_q = max_q
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-
-        # Keep as PIL so process_vision_info works later
-        image_path = os.path.join(images_path, sample["image"])
-        image = Image.open(image_path).convert("RGB")
-
-        # filter out invalid/missing answers
-        qa_pairs = [
-            p for p in sample["qas"]
-            if p.get("a") not in (None, "", float("nan"))  # works for None, empty, NaN
-            and not (isinstance(p.get("a"), float) and np.isnan(p["a"]))  # strict NaN check
-        ]
-
-        if not qa_pairs:
-            return None  
-
-        k = random.randint(self.min_q, min(self.max_q, len(qa_pairs)))
-        chosen_pairs = random.sample(qa_pairs, k)
-
-        questions_str = (
-            user_prompt
-            + "; ".join(
-                f'Question: "{prompts.get_prompt(p["q"])}" This corresponds to JSON key "{p["k"]}"'
-                for p in chosen_pairs
-            )
-            + "</QUESTIONS>"
-        )
-        answers_dict = {p['k']: p['a'] for p in chosen_pairs}
-        answers_str = json.dumps(answers_dict, ensure_ascii=False)
-    
-        return {
-            "image": image,  # PIL
-            "questions": questions_str,
-            "answers": answers_str,
-        }
-
-def process_vision_info(messages: list[dict]) -> list[Image.Image]:
-    image_inputs = []
-    for msg in messages:
-        content = msg.get("content", [])
-        if not isinstance(content, list):
-            content = [content]
-
-        for element in content:
-            if isinstance(element, dict) and (
-                "image" in element or element.get("type") == "image"
-            ):
-                img = element.get("image", element)
-                if isinstance(img, str):
-                    img = Image.open(img).convert("RGB")
-                elif not isinstance(img, Image.Image):
-                    raise ValueError(f"Unsupported image type: {type(img)}")
-                image_inputs.append(img)
-    return image_inputs
-
+# ============== Datasets and Data Loaders ==============
+from Dataset import OCRVQADataset, process_vision_info
 
 dataset_obj = OCRVQADataset(dataset_path)
 
-# Set split sizes
+# === Set split sizes ===
 total_size = len(dataset_obj)
 train_size = int(0.8 * total_size)
 val_size = int(0.1 * total_size)
 test_size = total_size - train_size - val_size
-
-# Use a generator with a manual seed for reproducibility
 generator = torch.Generator().manual_seed(42)
 
 train_dataset, val_dataset, test_dataset = random_split(
     dataset_obj, [train_size, val_size, test_size], generator=generator
 )
 
-train_dataset_fmt = [format_data(sample) for sample in train_dataset]
-val_dataset_fmt = [format_data(sample) for sample in val_dataset]
 
-print(train_dataset_fmt[100])
 
-# pause before training for dataset testing
-#exit("test complete")
+# ============== MODELS AND TRAINERS ==============
 
 accelerator = Accelerator(mixed_precision="bf16")
 writer = SummaryWriter(log_dir=logs_dir)
@@ -189,25 +92,9 @@ model = AutoModelForImageTextToText.from_pretrained(
     base_model,
     torch_dtype=torch.bfloat16
 )
-
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
-
-print("Visible devices:", accelerator.state.num_processes)
-print("Local device:", accelerator.device)
-
-peft_config = LoraConfig(
-    lora_alpha=16,
-    lora_dropout=0.05,
-    r=16,
-    bias="none",
-    target_modules="all-linear",
-    task_type="CAUSAL_LM",
-    modules_to_save=["lm_head", "embed_tokens"],
-)
-
-model = get_peft_model(model, peft_config)
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
@@ -224,9 +111,7 @@ def collate_fn(examples):
         text=texts,
         images=images,
         return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512
+        padding=True
     )
 
     labels = batch["input_ids"].clone()
@@ -242,49 +127,71 @@ def collate_fn(examples):
 
     return batch
 
-
 train_dataloader = DataLoader(
-    train_dataset_fmt,
+    train_dataset,
     batch_size=2,
     shuffle=True,
     collate_fn=collate_fn,
 )
 
 val_dataloader = DataLoader(
-    val_dataset_fmt,
+    val_dataset,
     batch_size=2,
     shuffle=True,
     collate_fn=collate_fn,
 )
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-
-model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
-    model, optimizer, train_dataloader, val_dataloader
+peft_config = LoraConfig(
+    lora_alpha=16,
+    lora_dropout=0.05,
+    r=16,
+    bias="none",
+    target_modules="all-linear",
+    task_type="CAUSAL_LM",
+    modules_to_save=["lm_head", "embed_tokens"],
 )
 
+model = get_peft_model(model, peft_config)
 
-loss_fn = torch.nn.CrossEntropyLoss()
-num_epochs = 3
-gradient_accumulation_steps = 4
-
-global_step = 0
+# ================ Training Loop ================
+# Params:
+max_steps = 50
+num_warmup_steps = int(0.05 * max_steps)
+gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
-sample_every = 2  # steps for logging sample responses
+val_every = 25  # run validation every N steps
+max_grad_norm = 1.0
+
+optimizer = torch.optim.AdamW(model.parameters())
+
+lr_scheduler = get_cosine_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps=num_warmup_steps,
+    num_training_steps=max_steps,
+)
+
+model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+    model, optimizer, train_dataloader, val_dataloader, lr_scheduler
+)
+
+# === Start Training ===
 
 model.train()
-val_every = 25  # run validation every N steps
 
-for epoch in range(num_epochs):
+global_step = 0
+while global_step < max_steps:
     for step, batch in enumerate(train_dataloader):
         outputs = model(**batch)
-        loss = outputs.loss if hasattr(outputs, "loss") else loss_fn(outputs.logits, batch["labels"])
+        loss = outputs.loss
         loss = loss / gradient_accumulation_steps
 
         accelerator.backward(loss)
 
         if (step + 1) % gradient_accumulation_steps == 0:
+            accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
+
             optimizer.step()
+            lr_scheduler.step()
             optimizer.zero_grad()
             global_step += 1
 
@@ -309,10 +216,14 @@ for epoch in range(num_epochs):
 
                 model.train()  # switch back
 
+            if global_step >= max_steps:
+                break
 
-# SAVE THE MODEL
+
+# ============ SAVE THE MODEL ============
 accelerator.wait_for_everyone()
 unwrapped_model = accelerator.unwrap_model(model)
-unwrapped_model.save_pretrained("gemma-supplements-small/final")
+
+unwrapped_model.save_pretrained(f"{save_dir}/{run_name}")
 writer.close()
 

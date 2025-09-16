@@ -2,3 +2,5 @@
 .ipynb_checkpoints/*
 gemma-supplements-small/*
 __pycache__/*
+finetunes/*
+nohup.out
