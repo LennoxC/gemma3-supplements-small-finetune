@@ -114,26 +114,3 @@ with torch.no_grad():
 
 avg_test_loss = test_loss / total_samples
 print(f"Average Test Loss: {avg_test_loss:.4f}")
-
-# === Generate some samples ===
-print("\n=== Sample Generations ===")
-for i in range(3):
-    example = test_dataset[i]
-    text = processor.apply_chat_template(example["messages"], add_generation_prompt=True, tokenize=False)
-    image_inputs = process_vision_info(example["messages"])
-
-    inputs = processor(
-        text=text,
-        images=image_inputs,
-        return_tensors="pt",
-        padding=True
-    ).to(accelerator.device)
-
-    with torch.no_grad():
-        output_ids = model.generate(**inputs, max_new_tokens=128)
-
-    decoded = processor.decode(output_ids[0], skip_special_tokens=True)
-
-    print(f"\n--- Example {i+1} ---")
-    print("Prompt:", text[:200], "..." if len(text) > 200 else "")
-    print("Generated:", decoded)
