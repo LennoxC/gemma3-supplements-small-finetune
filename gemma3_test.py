@@ -27,7 +27,7 @@ model_path = os.path.join(save_dir, experiment_name)
 dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 
 # === Build dataset ===
-dataset_obj = OCRVQADataset(dataset_path, train_mode=False)
+dataset_obj = OCRVQADataset(dataset_path)
 
 # same splits as trainer
 total_size = len(dataset_obj)
@@ -46,14 +46,24 @@ processor = AutoProcessor.from_pretrained(model_path)
 # === Collator ===
 def collate_fn(examples):
     texts, images = [], []
+
     for example in examples:
+        # Process images
         image_inputs = process_vision_info(example["messages"])
-        text = processor.apply_chat_template(
-            example["messages"], add_generation_prompt=False, tokenize=False
-        )
-        texts.append(text.strip())
         images.append(image_inputs)
 
+        # Get full chat text
+        text = processor.apply_chat_template(
+            example["messages"],
+            add_generation_prompt=False,
+            tokenize=False,
+            do_pan_and_scan=True
+        ).strip()
+        texts.append(text)
+
+        print(text)  # optional: for debugging
+
+    # Encode the batch
     batch = processor(
         text=texts,
         images=images,
@@ -62,16 +72,38 @@ def collate_fn(examples):
     )
 
     labels = batch["input_ids"].clone()
-    image_token_id = [
-        processor.tokenizer.convert_tokens_to_ids(
-            processor.tokenizer.special_tokens_map["boi_token"]
-        )
-    ]
+
+    # IDs for the sequence indicating start of model response
+    start_tokens = [105, 4368]  # <start_of_turn>, model
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(
+        processor.tokenizer.special_tokens_map["boi_token"]
+    )
+
+    for i in range(labels.size(0)):
+        seq = labels[i]
+
+        # loss should only be computed over the JSON model output
+        # to do this, we mask all the tokens up to <start_of_turn>model
+        # <start_of_turn>model is followed by the model response
+        # <start_of_turn>model is two tokens
+        # Find first occurrence of the consecutive tokens
+        found = False
+        for j in range(len(seq) - 1):
+            if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
+                start_idx = j + 1
+                labels[i, :start_idx+1] = -100
+                found = True
+                break
+        if not found:
+            # if model response is not in training data, mask all tokens (nothing to compute loss on)
+            labels[i, :] = -100
+
+    # Mask padding and image tokens
     labels[labels == processor.tokenizer.pad_token_id] = -100
     labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100
-    batch["labels"] = labels
+    labels[labels == 262144] = -100  # optional extra masking
 
+    batch["labels"] = labels
     return batch
 
 # === Accelerator ===
@@ -122,12 +154,6 @@ print("\n=== Example Predictions from Test Set ===")
 # Pick a handful of samples
 num_examples = 5
 subset = [test_dataset[i] for i in range(num_examples)]
-
-#import torch._dynamo
-
-# before your generation loop
-#torch._dynamo.config.suppress_errors = True  # avoid crashing on unsupported ops
-#torch._dynamo.disable()  # disable graph capture for now
 
 gen_model = accelerator.unwrap_model(model)
 eos_token_id = processor.tokenizer.convert_tokens_to_ids("<end_of_turn>")
