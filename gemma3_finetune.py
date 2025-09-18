@@ -95,14 +95,9 @@ model = AutoModelForImageTextToText.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(base_model)
 
-print(tokenizer.special_tokens_map)
-
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
-
-print(tokenizer.convert_tokens_to_ids('<start_of_turn>model'))
-print(tokenizer.convert_tokens_to_ids('<end_of_turn>'))
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
@@ -161,7 +156,6 @@ def collate_fn(examples):
     labels[labels == 262144] = -100  # optional extra masking
 
     batch["labels"] = labels
-    visualize_masking(batch)
     return batch
 
 def visualize_masking(batch, num_tokens=5000):
@@ -228,7 +222,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 2
+max_steps = 75
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
