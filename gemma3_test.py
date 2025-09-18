@@ -12,6 +12,7 @@ from Dataset import OCRVQADataset, process_vision_info   # same dataset class
 from prompt_loader import PromptLoader
 from PIL import Image
 from peft import PeftModel
+import matplotlib.pyplot as plt
 
 
 # === Load environment ===
@@ -26,7 +27,7 @@ model_path = os.path.join(save_dir, experiment_name)
 dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 
 # === Build dataset ===
-dataset_obj = OCRVQADataset(dataset_path)
+dataset_obj = OCRVQADataset(dataset_path, train_mode=False)
 
 # same splits as trainer
 total_size = len(dataset_obj)
@@ -97,7 +98,7 @@ loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 test_loss, total_samples = 0, 0
 
 global_batches = 0
-eval_limit = 20
+eval_limit = 1
 
 with torch.no_grad():
     for batch in tqdm(test_dataloader, desc="Evaluating"):
@@ -112,5 +113,59 @@ with torch.no_grad():
             break
 
 
+
 avg_test_loss = test_loss / total_samples
 print(f"Average Test Loss: {avg_test_loss:.4f}")
+
+print("\n=== Example Predictions from Test Set ===")
+
+# Pick a handful of samples
+num_examples = 5
+subset = [test_dataset[i] for i in range(num_examples)]
+
+#import torch._dynamo
+
+# before your generation loop
+#torch._dynamo.config.suppress_errors = True  # avoid crashing on unsupported ops
+#torch._dynamo.disable()  # disable graph capture for now
+
+gen_model = accelerator.unwrap_model(model)
+eos_token_id = processor.tokenizer.convert_tokens_to_ids("<end_of_turn>")
+
+for i, example in enumerate(subset):
+    # Build prompt
+    image_inputs = process_vision_info(example["messages"])
+    text_input = processor.apply_chat_template(
+        example["messages"], add_generation_prompt=True, tokenize=False
+    )
+
+    # get the image name
+    image_file_name = test_dataset.dataset.get_image_id(test_dataset.indices[i])
+
+    inputs = processor(
+        text=text_input,
+        images=image_inputs,
+        return_tensors="pt"
+    ).to(accelerator.device)
+
+    # Generate
+    with torch.no_grad():
+        generated_ids = gen_model.generate(
+            **inputs,
+            max_new_tokens=128,
+            eos_token_id=eos_token_id
+        )
+
+    imgs = process_vision_info(test_dataset[i]["messages"])
+
+    decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    # Extract only the model’s part
+    if "<start_of_turn>model" in decoded:
+        generated_text = decoded.split("<start_of_turn>model")[-1].strip()
+    else:
+        generated_text = decoded.strip()
+
+    print(f"\n--- Example {i+1} ---")
+    print(f"Image: {image_file_name}")
+    print(f"Model Output:\n{generated_text}")
