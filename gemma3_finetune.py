@@ -82,8 +82,6 @@ train_dataset, val_dataset, test_dataset = random_split(
     dataset_obj, [train_size, val_size, test_size], generator=generator
 )
 
-
-
 # ============== MODELS AND TRAINERS ==============
 
 accelerator = Accelerator(mixed_precision="bf16")
@@ -138,16 +136,20 @@ def collate_fn(examples):
     for i in range(labels.size(0)):
         seq = labels[i]
 
+        # loss should only be computed over the JSON model output
+        # to do this, we mask all the tokens up to <start_of_turn>model
+        # <start_of_turn>model is followed by the model response
+        # <start_of_turn>model is two tokens
         # Find first occurrence of the consecutive tokens
         found = False
         for j in range(len(seq) - 1):
             if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
-                start_idx = j + 1  # mask up to the second token (inclusive)
+                start_idx = j + 1
                 labels[i, :start_idx+1] = -100
                 found = True
                 break
         if not found:
-            # fallback: mask entire sequence if start tokens not found
+            # if model response is not in training data, mask all tokens (nothing to compute loss on)
             labels[i, :] = -100
 
     # Mask padding and image tokens
@@ -157,34 +159,6 @@ def collate_fn(examples):
 
     batch["labels"] = labels
     return batch
-
-def visualize_masking(batch, num_tokens=5000):
-    """
-    Visualizes masking in a batch.
-    
-    Args:
-        batch: the output of collate_fn containing input_ids and labels
-        num_tokens: number of tokens to print per sequence for readability
-    """
-    input_ids = batch["input_ids"]
-    labels = batch["labels"]
-    tokenizer = processor.tokenizer
-
-    for i in range(input_ids.size(0)):
-        seq_ids = input_ids[i].tolist()
-        label_ids = labels[i].tolist()
-
-        print(f"\nSequence {i}:")
-        for j in range(min(len(seq_ids), num_tokens)):
-            token = tokenizer.convert_ids_to_tokens(seq_ids[j])
-            label = label_ids[j]
-            # show masked tokens with "X", unmasked with token itself
-            #if label == -100:
-            #    display = "X"
-            #else:
-            display = f"{token}({label_ids[j]}, {seq_ids[j]})"
-            print(f"{display}", end=" ")
-        print("\n")  # newline after sequence
 
 train_dataloader = DataLoader(
     train_dataset,
