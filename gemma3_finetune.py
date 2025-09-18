@@ -95,21 +95,36 @@ model = AutoModelForImageTextToText.from_pretrained(
 )
 tokenizer = AutoTokenizer.from_pretrained(base_model)
 
+print(tokenizer.special_tokens_map)
+
 model.config.use_cache = False
 
 processor = AutoProcessor.from_pretrained(base_model)
 
+print(tokenizer.convert_tokens_to_ids('<start_of_turn>model'))
+print(tokenizer.convert_tokens_to_ids('<end_of_turn>'))
+
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
     texts, images = [], []
+
     for example in examples:
+        # Process images
         image_inputs = process_vision_info(example["messages"])
-        text = processor.apply_chat_template(
-            example["messages"], add_generation_prompt=False, tokenize=False
-        )
-        texts.append(text.strip())
         images.append(image_inputs)
 
+        # Get full chat text
+        text = processor.apply_chat_template(
+            example["messages"],
+            add_generation_prompt=False,
+            tokenize=False,
+            do_pan_and_scan=True
+        ).strip()
+        texts.append(text)
+
+        print(text)  # optional: for debugging
+
+    # Encode the batch
     batch = processor(
         text=texts,
         images=images,
@@ -118,17 +133,64 @@ def collate_fn(examples):
     )
 
     labels = batch["input_ids"].clone()
-    image_token_id = [
-        processor.tokenizer.convert_tokens_to_ids(
-            processor.tokenizer.special_tokens_map["boi_token"]
-        )
-    ]
+
+    # IDs for the sequence indicating start of model response
+    start_tokens = [105, 4368]  # <start_of_turn>, model
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(
+        processor.tokenizer.special_tokens_map["boi_token"]
+    )
+
+    for i in range(labels.size(0)):
+        seq = labels[i]
+
+        # Find first occurrence of the consecutive tokens
+        found = False
+        for j in range(len(seq) - 1):
+            if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
+                start_idx = j + 1  # mask up to the second token (inclusive)
+                labels[i, :start_idx+1] = -100
+                found = True
+                break
+        if not found:
+            # fallback: mask entire sequence if start tokens not found
+            labels[i, :] = -100
+
+    # Mask padding and image tokens
     labels[labels == processor.tokenizer.pad_token_id] = -100
     labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100
-    batch["labels"] = labels
+    labels[labels == 262144] = -100  # optional extra masking
 
+    batch["labels"] = labels
+    visualize_masking(batch)
     return batch
+
+def visualize_masking(batch, num_tokens=5000):
+    """
+    Visualizes masking in a batch.
+    
+    Args:
+        batch: the output of collate_fn containing input_ids and labels
+        num_tokens: number of tokens to print per sequence for readability
+    """
+    input_ids = batch["input_ids"]
+    labels = batch["labels"]
+    tokenizer = processor.tokenizer
+
+    for i in range(input_ids.size(0)):
+        seq_ids = input_ids[i].tolist()
+        label_ids = labels[i].tolist()
+
+        print(f"\nSequence {i}:")
+        for j in range(min(len(seq_ids), num_tokens)):
+            token = tokenizer.convert_ids_to_tokens(seq_ids[j])
+            label = label_ids[j]
+            # show masked tokens with "X", unmasked with token itself
+            #if label == -100:
+            #    display = "X"
+            #else:
+            display = f"{token}({label_ids[j]}, {seq_ids[j]})"
+            print(f"{display}", end=" ")
+        print("\n")  # newline after sequence
 
 train_dataloader = DataLoader(
     train_dataset,
@@ -166,7 +228,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 101
+max_steps = 2
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
