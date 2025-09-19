@@ -187,11 +187,11 @@ for i, example in enumerate(subset):
     decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
     # Extract only the model’s part
-    if "<start_of_turn>model" in decoded:
-        generated_text = decoded.split("<start_of_turn>model")[-1].strip()
-    else:
-        generated_text = decoded.strip()
+    #if "<start_of_turn>model" in decoded:
+    #    generated_text = decoded.split("<start_of_turn>model")[-1].strip()
+    #else:
+    #    generated_text = decoded.strip()
 
     print(f"\n--- Example {i+1} ---")
     print(f"Image: {image_file_name}")
-    print(f"Model Output:\n{generated_text}")
+    print(f"Model Output:\n{decoded}")

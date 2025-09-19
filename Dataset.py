@@ -85,6 +85,9 @@ class OCRVQADataset(Dataset):
                 },
             ]
         }
+        
+    def get_image_id(self, idx):
+        return self.samples[idx]["image"]
 
 def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     image_inputs = []
