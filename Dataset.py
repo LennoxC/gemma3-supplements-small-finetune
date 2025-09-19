@@ -67,30 +67,25 @@ class OCRVQADataset(Dataset):
         answers_dict = {p['k']: p['a'] for p in chosen_pairs}
         answers_str = json.dumps(answers_dict, ensure_ascii=False)
 
+
         messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": system_message}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": questions_str},
-                        {"type": "image", "image": image},
-                    ],
-                }
+            {"role": "system", "content": [{"type": "text", "text": system_message}]},
+            {"role": "user", "content": [{"type": "text", "text": questions_str},
+                                         {"type": "image", "image": image}]},
         ]
 
         if self.train:
-            messages.append({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": answers_str}],
-                })
+            answers_dict = {p['k']: p['a'] for p in chosen_pairs}
+            answers_str = json.dumps(answers_dict, ensure_ascii=False)
+            messages.append({"role": "assistant",
+                             "content": [{"type": "text", "text": answers_str}]})
 
-        return messages
-        
+        return {"messages": messages}
+    
     def get_image_id(self, idx):
         return self.samples[idx]["image"]
+        
+    
 
 def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     image_inputs = []
