@@ -27,7 +27,7 @@ model_path = os.path.join(save_dir, experiment_name)
 dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 
 # === Build dataset ===
-dataset_obj = OCRVQADataset(dataset_path)
+dataset_obj = OCRVQADataset(dataset_path, train=False)
 
 # same splits as trainer
 total_size = len(dataset_obj)
