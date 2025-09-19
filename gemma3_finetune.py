@@ -115,8 +115,6 @@ def collate_fn(examples):
         ).strip()
         texts.append(text)
 
-        print(text)  # optional: for debugging
-
     # Encode the batch
     batch = processor(
         text=texts,
@@ -196,7 +194,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 75
+max_steps = 1001
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
