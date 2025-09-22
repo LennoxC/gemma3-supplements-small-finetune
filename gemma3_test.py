@@ -12,7 +12,6 @@ from Dataset import OCRVQADataset, process_vision_info   # same dataset class
 from prompt_loader import PromptLoader
 from PIL import Image
 from peft import PeftModel
-import matplotlib.pyplot as plt
 
 
 # === Load environment ===
@@ -44,26 +43,31 @@ _, _, test_dataset = random_split(
 processor = AutoProcessor.from_pretrained(model_path)
 
 # === Collator ===
+# Create a data collator to encode text and image pairs
 def collate_fn(examples):
     texts, images = [], []
 
-    for example in examples:
-        # Process images
-        image_inputs = process_vision_info(example["messages"])
-        images.append(image_inputs)
+    start_tokens = [105, 4368]  # <start_of_turn> followed by model token
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(
+        processor.tokenizer.special_tokens_map["boi_token"]
+    )
 
-        # Get full chat text
+    for example in examples:
+        messages = example["messages"]
+        # Full chat template with all special tokens
         text = processor.apply_chat_template(
-            example["messages"],
+            messages,
             add_generation_prompt=False,
-            tokenize=False,
-            do_pan_and_scan=True
-        ).strip()
+            tokenize=False
+        )
+        text += processor.tokenizer.eos_token
         texts.append(text)
 
-        print(text)  # optional: for debugging
+        # Image(s)
+        image_inputs = process_vision_info(messages)
+        images.append(image_inputs)
 
-    # Encode the batch
+    # Let processor tokenize + pad + add specials
     batch = processor(
         text=texts,
         images=images,
@@ -71,39 +75,30 @@ def collate_fn(examples):
         padding=True
     )
 
+    # Clone input_ids as labels
     labels = batch["input_ids"].clone()
 
-    # IDs for the sequence indicating start of model response
-    start_tokens = [105, 4368]  # <start_of_turn>, model
-    image_token_id = processor.tokenizer.convert_tokens_to_ids(
-        processor.tokenizer.special_tokens_map["boi_token"]
-    )
-
+    # Mask everything except the model response
     for i in range(labels.size(0)):
         seq = labels[i]
-
-        # loss should only be computed over the JSON model output
-        # to do this, we mask all the tokens up to <start_of_turn>model
-        # <start_of_turn>model is followed by the model response
-        # <start_of_turn>model is two tokens
-        # Find first occurrence of the consecutive tokens
         found = False
         for j in range(len(seq) - 1):
             if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
-                start_idx = j + 1
-                labels[i, :start_idx+1] = -100
+                start_idx = j + 2  # start after <start_of_turn> + model token
+                labels[i, :start_idx] = -100
                 found = True
                 break
         if not found:
-            # if model response is not in training data, mask all tokens (nothing to compute loss on)
+            # mask entire sequence if no response found
             labels[i, :] = -100
 
-    # Mask padding and image tokens
-    labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100  # optional extra masking
+        # Mask padding + image tokens
+        labels[i, labels[i] == processor.tokenizer.pad_token_id] = -100
+        labels[i, labels[i] == image_token_id] = -100
 
     batch["labels"] = labels
+
+    #print(visualize_masking(batch, processor))
     return batch
 
 # === Accelerator ===

@@ -100,124 +100,61 @@ processor = AutoProcessor.from_pretrained(base_model)
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
-    texts, images, labels = [], [], []
+    texts, images = [], []
 
-    for example in examples:
-        # full chat string with <boi>, <bos>, etc.
-        text = processor.apply_chat_template(
-            example["messages"],
-            add_generation_prompt=False,
-            tokenize=False
-        )
-        texts.append(text)
-
-        # image(s)
-        image_inputs = process_vision_info(example["messages"])
-        images.append(image_inputs)
-
-        # tokenize once to get ids
-        input_ids = processor.tokenizer(text, add_special_tokens=False).input_ids
-        label_ids = [-100] * len(input_ids)  # start fully masked
-
-        # target JSON (assistant reply only)
-        json_response = example["messages"][-1]["content"][0]["text"]
-        parsed = json.loads(json_response)
-
-        # tokenized schema/value parts
-        brace_open = processor.tokenizer("{", add_special_tokens=False).input_ids
-        brace_close = processor.tokenizer("}", add_special_tokens=False).input_ids
-        comma = processor.tokenizer(", ", add_special_tokens=False).input_ids
-
-        seq, mask = [], []
-        for k, v in parsed.items():
-            schema_str = f'"{k}": '
-            schema_ids = processor.tokenizer(schema_str, add_special_tokens=False).input_ids
-            seq.extend(schema_ids)
-            mask.extend([-100] * len(schema_ids))
-
-            value_str = json.dumps(v, ensure_ascii=False)
-            value_ids = processor.tokenizer(value_str, add_special_tokens=False).input_ids
-            seq.extend(value_ids)
-            mask.extend(value_ids)
-
-            seq.extend(comma)
-            mask.extend([-100] * len(comma))
-
-        seq = brace_open + seq[:-len(comma)] + brace_close
-        mask = [-100] * len(brace_open) + mask[:-len(comma)] + [-100] * len(brace_close)
-
-        # find subsequence inside input_ids and insert mask
-        for start in range(len(input_ids) - len(seq) + 1):
-            if input_ids[start:start+len(seq)] == seq:
-                label_ids[start:start+len(seq)] = mask
-                break
-
-        labels.append(label_ids)
-
-    # let processor handle padding for input_ids & images
-    batch = processor(
-        text=texts,
-        images=images,
-        return_tensors="pt",
-        padding=True
-    )
-
-    # pad labels to same length as input_ids
-    max_len = batch["input_ids"].shape[1]
-    padded_labels = [
-        l + [-100] * (max_len - len(l))
-        for l in labels
-    ]
-    batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
-
-
-    print(visualize_masking(batch, processor))
-    return batch
-
-    '''
-    # Encode the batch
-    batch = processor(
-        text=texts,
-        images=images,
-        return_tensors="pt",
-        padding=True
-    )
-
-    labels = batch["input_ids"].clone()
-
-    # IDs for the sequence indicating start of model response
-    start_tokens = [105, 4368]  # <start_of_turn>, model
+    start_tokens = [105, 4368]  # <start_of_turn> followed by model token
     image_token_id = processor.tokenizer.convert_tokens_to_ids(
         processor.tokenizer.special_tokens_map["boi_token"]
     )
 
+    for example in examples:
+        messages = example["messages"]
+        # Full chat template with all special tokens
+        text = processor.apply_chat_template(
+            messages,
+            add_generation_prompt=False,
+            tokenize=False
+        )
+        text += processor.tokenizer.eos_token
+        texts.append(text)
+
+        # Image(s)
+        image_inputs = process_vision_info(messages)
+        images.append(image_inputs)
+
+    # Let processor tokenize + pad + add specials
+    batch = processor(
+        text=texts,
+        images=images,
+        return_tensors="pt",
+        padding=True
+    )
+
+    # Clone input_ids as labels
+    labels = batch["input_ids"].clone()
+
+    # Mask everything except the model response
     for i in range(labels.size(0)):
         seq = labels[i]
-
-        # loss should only be computed over the JSON model output
-        # to do this, we mask all the tokens up to <start_of_turn>model
-        # <start_of_turn>model is followed by the model response
-        # <start_of_turn>model is two tokens
-        # Find first occurrence of the consecutive tokens
         found = False
         for j in range(len(seq) - 1):
             if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
-                start_idx = j + 1
-                labels[i, :start_idx+1] = -100
+                start_idx = j + 2  # start after <start_of_turn> + model token
+                labels[i, :start_idx] = -100
                 found = True
                 break
         if not found:
-            # if model response is not in training data, mask all tokens (nothing to compute loss on)
+            # mask entire sequence if no response found
             labels[i, :] = -100
 
-    # Mask padding and image tokens
-    labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100  # optional extra masking
+        # Mask padding + image tokens
+        labels[i, labels[i] == processor.tokenizer.pad_token_id] = -100
+        labels[i, labels[i] == image_token_id] = -100
 
     batch["labels"] = labels
+
+    #print(visualize_masking(batch, processor))
     return batch
-    '''
 
 train_dataloader = DataLoader(
     train_dataset,
@@ -256,7 +193,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 2
+max_steps = 100
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging

@@ -59,14 +59,12 @@ class OCRVQADataset(Dataset):
             user_prompt
             + "; ".join(
                 f'Question: "{prompts.get_prompt(p["q"])}" '
-                f'This corresponds to JSON key "{p["k"]}"'
                 for p in chosen_pairs
             )
             + "</QUESTIONS>"
         )
-        answers_dict = {p['k']: p['a'] for p in chosen_pairs}
-        answers_str = json.dumps(answers_dict, ensure_ascii=False)
-
+        answers_list = [str(p['a']) for p in chosen_pairs]
+        answers_str = ", ".join(answers_list)
 
         messages = [
             {"role": "system", "content": [{"type": "text", "text": system_message}]},
@@ -75,8 +73,6 @@ class OCRVQADataset(Dataset):
         ]
 
         if self.train:
-            answers_dict = {p['k']: p['a'] for p in chosen_pairs}
-            answers_str = json.dumps(answers_dict, ensure_ascii=False)
             messages.append({"role": "assistant",
                              "content": [{"type": "text", "text": answers_str}]})
 
