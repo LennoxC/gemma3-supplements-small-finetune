@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from prompt_loader import PromptLoader
 import numpy as np
 import deepspeed
+from utils import visualize_masking
 
 # ==================== ENVIRONMENT SETUP ====================
 
@@ -99,22 +100,81 @@ processor = AutoProcessor.from_pretrained(base_model)
 
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
-    texts, images = [], []
+    texts, images, labels = [], [], []
 
     for example in examples:
-        # Process images
-        image_inputs = process_vision_info(example["messages"])
-        images.append(image_inputs)
-
-        # Get full chat text
+        # full chat string with <boi>, <bos>, etc.
         text = processor.apply_chat_template(
             example["messages"],
             add_generation_prompt=False,
-            tokenize=False,
-            do_pan_and_scan=True
-        ).strip()
+            tokenize=False
+        )
         texts.append(text)
 
+        # image(s)
+        image_inputs = process_vision_info(example["messages"])
+        images.append(image_inputs)
+
+        # tokenize once to get ids
+        input_ids = processor.tokenizer(text, add_special_tokens=False).input_ids
+        label_ids = [-100] * len(input_ids)  # start fully masked
+
+        # target JSON (assistant reply only)
+        json_response = example["messages"][-1]["content"][0]["text"]
+        parsed = json.loads(json_response)
+
+        # tokenized schema/value parts
+        brace_open = processor.tokenizer("{", add_special_tokens=False).input_ids
+        brace_close = processor.tokenizer("}", add_special_tokens=False).input_ids
+        comma = processor.tokenizer(", ", add_special_tokens=False).input_ids
+
+        seq, mask = [], []
+        for k, v in parsed.items():
+            schema_str = f'"{k}": '
+            schema_ids = processor.tokenizer(schema_str, add_special_tokens=False).input_ids
+            seq.extend(schema_ids)
+            mask.extend([-100] * len(schema_ids))
+
+            value_str = json.dumps(v, ensure_ascii=False)
+            value_ids = processor.tokenizer(value_str, add_special_tokens=False).input_ids
+            seq.extend(value_ids)
+            mask.extend(value_ids)
+
+            seq.extend(comma)
+            mask.extend([-100] * len(comma))
+
+        seq = brace_open + seq[:-len(comma)] + brace_close
+        mask = [-100] * len(brace_open) + mask[:-len(comma)] + [-100] * len(brace_close)
+
+        # find subsequence inside input_ids and insert mask
+        for start in range(len(input_ids) - len(seq) + 1):
+            if input_ids[start:start+len(seq)] == seq:
+                label_ids[start:start+len(seq)] = mask
+                break
+
+        labels.append(label_ids)
+
+    # let processor handle padding for input_ids & images
+    batch = processor(
+        text=texts,
+        images=images,
+        return_tensors="pt",
+        padding=True
+    )
+
+    # pad labels to same length as input_ids
+    max_len = batch["input_ids"].shape[1]
+    padded_labels = [
+        l + [-100] * (max_len - len(l))
+        for l in labels
+    ]
+    batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+
+
+    print(visualize_masking(batch, processor))
+    return batch
+
+    '''
     # Encode the batch
     batch = processor(
         text=texts,
@@ -157,6 +217,7 @@ def collate_fn(examples):
 
     batch["labels"] = labels
     return batch
+    '''
 
 train_dataloader = DataLoader(
     train_dataset,
@@ -173,18 +234,19 @@ val_dataloader = DataLoader(
 )
 
 peft_config = LoraConfig(
-    lora_alpha=16,
+    lora_alpha=8,
     lora_dropout=0.05,
-    r=64,
+    r=16,
     bias="none",
     target_modules=[
         "q_proj",
-        "k_proj",
+        #"k_proj",
         "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj"],
+        #"o_proj",
+        #"gate_proj",
+        #"up_proj",
+        #"down_proj"],
+    ],
     task_type="CAUSAL_LM"
 )
 
@@ -194,7 +256,7 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 1001
+max_steps = 2
 num_warmup_steps = int(0.05 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
