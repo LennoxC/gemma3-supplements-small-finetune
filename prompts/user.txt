@@ -1,9 +1,5 @@
 Using primarily the text contained in the attached label supplement image, answer the list of questions in the <QUESTIONS> tags.
-Answer concisely in correct JSON format with no preamble, allowing the response to easily be parsed. An example response would be:
-{
-  "company": "label supplelments co",
-  "contents": 120
-}
+Answer concisely in a comma-seperated list with no preamble, and answers only, in the order of which the questions were asked.
 
 The questions you are required to answer are as follows:
 <QUESTIONS>

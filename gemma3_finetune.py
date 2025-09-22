@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from prompt_loader import PromptLoader
 import numpy as np
 import deepspeed
+from utils import visualize_masking
 
 # ==================== ENVIRONMENT SETUP ====================
 
@@ -82,8 +83,6 @@ train_dataset, val_dataset, test_dataset = random_split(
     dataset_obj, [train_size, val_size, test_size], generator=generator
 )
 
-
-
 # ============== MODELS AND TRAINERS ==============
 
 accelerator = Accelerator(mixed_precision="bf16")
@@ -102,14 +101,28 @@ processor = AutoProcessor.from_pretrained(base_model)
 # Create a data collator to encode text and image pairs
 def collate_fn(examples):
     texts, images = [], []
+
+    start_tokens = [105, 4368]  # <start_of_turn> followed by model token
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(
+        processor.tokenizer.special_tokens_map["boi_token"]
+    )
+
     for example in examples:
-        image_inputs = process_vision_info(example["messages"])
+        messages = example["messages"]
+        # Full chat template with all special tokens
         text = processor.apply_chat_template(
-            example["messages"], add_generation_prompt=False, tokenize=False
+            messages,
+            add_generation_prompt=False,
+            tokenize=False
         )
-        texts.append(text.strip())
+        text += processor.tokenizer.eos_token
+        texts.append(text)
+
+        # Image
+        image_inputs = process_vision_info(messages)
         images.append(image_inputs)
 
+    # Let processor tokenize + pad + add specials
     batch = processor(
         text=texts,
         images=images,
@@ -117,15 +130,27 @@ def collate_fn(examples):
         padding=True
     )
 
+    # Clone input_ids as labels
     labels = batch["input_ids"].clone()
-    image_token_id = [
-        processor.tokenizer.convert_tokens_to_ids(
-            processor.tokenizer.special_tokens_map["boi_token"]
-        )
-    ]
-    labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100
+
+    # Mask everything except the model response
+    for i in range(labels.size(0)):
+        seq = labels[i]
+        found = False
+        for j in range(len(seq) - 1):
+            if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
+                start_idx = j + 2  # start after <start_of_turn> + model token
+                labels[i, :start_idx] = -100
+                found = True
+                break
+        if not found:
+            # mask entire sequence if no response found
+            labels[i, :] = -100
+
+        # Mask padding + image tokens
+        labels[i, labels[i] == processor.tokenizer.pad_token_id] = -100
+        labels[i, labels[i] == image_token_id] = -100
+
     batch["labels"] = labels
 
     return batch
@@ -145,20 +170,25 @@ val_dataloader = DataLoader(
 )
 
 peft_config = LoraConfig(
-    lora_alpha=16,
+    lora_alpha=8,
     lora_dropout=0.05,
-    r=64,
+    r=16,
     bias="none",
     target_modules=[
         "q_proj",
-        "k_proj",
         "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj"],
+    ],
     task_type="CAUSAL_LM"
 )
+
+# Gemma 3 modules:
+#       "q_proj",
+#       "k_proj",
+#       "v_proj",
+#       "o_proj",
+#       "gate_proj",
+#       "up_proj",
+#       "down_proj"
 
 model = get_peft_model(model, peft_config)
 
@@ -166,8 +196,8 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 101
-num_warmup_steps = int(0.05 * max_steps)
+max_steps = 2001
+num_warmup_steps = int(0.02 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
 val_every = 25  # run validation every N steps

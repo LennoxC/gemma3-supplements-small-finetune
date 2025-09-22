@@ -18,13 +18,14 @@ dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 images_path  = os.path.join(data_dir, "images")
 
 class OCRVQADataset(Dataset):
-    def __init__(self, jsonl_file, transform=None, min_q=1, max_q=4):
+    def __init__(self, jsonl_file, transform=None, min_q=1, max_q=4, train=True):
         with open(jsonl_file, 'r') as f:
             self.samples = [json.loads(line) for line in f]
 
         self.transform = transform or transforms.ToTensor()
         self.min_q = min_q
         self.max_q = max_q
+        self.train = train
 
         # Filter invalid upfront (instead of returning None later)
         import numpy as np
@@ -58,33 +59,29 @@ class OCRVQADataset(Dataset):
             user_prompt
             + "; ".join(
                 f'Question: "{prompts.get_prompt(p["q"])}" '
-                f'This corresponds to JSON key "{p["k"]}"'
                 for p in chosen_pairs
             )
             + "</QUESTIONS>"
         )
-        answers_dict = {p['k']: p['a'] for p in chosen_pairs}
-        answers_str = json.dumps(answers_dict, ensure_ascii=False)
+        answers_list = [str(p['a']) for p in chosen_pairs]
+        answers_str = ", ".join(answers_list)
 
-        return {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": system_message}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": questions_str},
-                        {"type": "image", "image": image},
-                    ],
-                },
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": answers_str}],
-                },
-            ]
-        }
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": system_message}]},
+            {"role": "user", "content": [{"type": "text", "text": questions_str},
+                                         {"type": "image", "image": image}]},
+        ]
+
+        if self.train:
+            messages.append({"role": "assistant",
+                             "content": [{"type": "text", "text": answers_str}]})
+
+        return {"messages": messages}
+    
+    def get_image_id(self, idx):
+        return self.samples[idx]["image"]
+        
+    
 
 def process_vision_info(messages: list[dict]) -> list[Image.Image]:
     image_inputs = []

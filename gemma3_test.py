@@ -26,7 +26,7 @@ model_path = os.path.join(save_dir, experiment_name)
 dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 
 # === Build dataset ===
-dataset_obj = OCRVQADataset(dataset_path)
+dataset_obj = OCRVQADataset(dataset_path, train=False)
 
 # same splits as trainer
 total_size = len(dataset_obj)
@@ -43,16 +43,31 @@ _, _, test_dataset = random_split(
 processor = AutoProcessor.from_pretrained(model_path)
 
 # === Collator ===
+# Create a data collator to encode text and image pairs
 def collate_fn(examples):
     texts, images = [], []
+
+    start_tokens = [105, 4368]  # <start_of_turn> followed by model token
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(
+        processor.tokenizer.special_tokens_map["boi_token"]
+    )
+
     for example in examples:
-        image_inputs = process_vision_info(example["messages"])
+        messages = example["messages"]
+        # Full chat template with all special tokens
         text = processor.apply_chat_template(
-            example["messages"], add_generation_prompt=False, tokenize=False
+            messages,
+            add_generation_prompt=False,
+            tokenize=False
         )
-        texts.append(text.strip())
+        text += processor.tokenizer.eos_token
+        texts.append(text)
+
+        # Image(s)
+        image_inputs = process_vision_info(messages)
         images.append(image_inputs)
 
+    # Let processor tokenize + pad + add specials
     batch = processor(
         text=texts,
         images=images,
@@ -60,17 +75,30 @@ def collate_fn(examples):
         padding=True
     )
 
+    # Clone input_ids as labels
     labels = batch["input_ids"].clone()
-    image_token_id = [
-        processor.tokenizer.convert_tokens_to_ids(
-            processor.tokenizer.special_tokens_map["boi_token"]
-        )
-    ]
-    labels[labels == processor.tokenizer.pad_token_id] = -100
-    labels[labels == image_token_id] = -100
-    labels[labels == 262144] = -100
+
+    # Mask everything except the model response
+    for i in range(labels.size(0)):
+        seq = labels[i]
+        found = False
+        for j in range(len(seq) - 1):
+            if seq[j].item() == start_tokens[0] and seq[j+1].item() == start_tokens[1]:
+                start_idx = j + 2  # start after <start_of_turn> + model token
+                labels[i, :start_idx] = -100
+                found = True
+                break
+        if not found:
+            # mask entire sequence if no response found
+            labels[i, :] = -100
+
+        # Mask padding + image tokens
+        labels[i, labels[i] == processor.tokenizer.pad_token_id] = -100
+        labels[i, labels[i] == image_token_id] = -100
+
     batch["labels"] = labels
 
+    #print(visualize_masking(batch, processor))
     return batch
 
 # === Accelerator ===
@@ -97,7 +125,7 @@ loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 test_loss, total_samples = 0, 0
 
 global_batches = 0
-eval_limit = 20
+eval_limit = 1
 
 with torch.no_grad():
     for batch in tqdm(test_dataloader, desc="Evaluating"):
@@ -112,5 +140,53 @@ with torch.no_grad():
             break
 
 
+
 avg_test_loss = test_loss / total_samples
 print(f"Average Test Loss: {avg_test_loss:.4f}")
+
+print("\n=== Example Predictions from Test Set ===")
+
+# Pick a handful of samples
+num_examples = 5
+subset = [test_dataset[i] for i in range(num_examples)]
+
+gen_model = accelerator.unwrap_model(model)
+eos_token_id = processor.tokenizer.convert_tokens_to_ids("<end_of_turn>")
+
+for i, example in enumerate(subset):
+    # Build prompt
+    image_inputs = process_vision_info(example["messages"])
+    text_input = processor.apply_chat_template(
+        example["messages"], add_generation_prompt=True, tokenize=False
+    )
+
+    # get the image name
+    image_file_name = test_dataset.dataset.get_image_id(test_dataset.indices[i])
+
+    inputs = processor(
+        text=text_input,
+        images=image_inputs,
+        return_tensors="pt"
+    ).to(accelerator.device)
+
+    # Generate
+    with torch.no_grad():
+        generated_ids = gen_model.generate(
+            **inputs,
+            max_new_tokens=128,
+            eos_token_id=eos_token_id
+        )
+
+    imgs = process_vision_info(test_dataset[i]["messages"])
+
+    decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    # Extract only the model’s part
+    #if "<start_of_turn>model" in decoded:
+    #    generated_text = decoded.split("<start_of_turn>model")[-1].strip()
+    #else:
+    #    generated_text = decoded.strip()
+
+    print(f"\n--- Example {i+1} ---")
+    print(f"Image: {image_file_name}")
+    print(f"Model Output:\n{decoded}")
