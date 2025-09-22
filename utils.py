@@ -1,5 +1,5 @@
-
-# this will need some imports to work correctly.
+# used to print the token label and id beside each token in the prompt.
+# this was useful for debugging the masking, but is not used in production.
 def visualize_masking(batch, processor, num_tokens=5000):
     input_ids = batch["input_ids"]
     labels = batch["labels"]
@@ -13,10 +13,6 @@ def visualize_masking(batch, processor, num_tokens=5000):
         for j in range(min(len(seq_ids), num_tokens)):
             token = tokenizer.convert_ids_to_tokens(seq_ids[j])
             label = label_ids[j]
-            # show masked tokens with "X", unmasked with token itself
-            #if label == -100:
-            #    display = "X"
-            #else:
             display = f"{token}({label_ids[j]}, {seq_ids[j]})"
             print(f"{display}", end=" ")
-        print("\n")  # newline after sequence
+        print("\n")

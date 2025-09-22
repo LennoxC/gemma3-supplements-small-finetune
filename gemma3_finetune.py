@@ -118,7 +118,7 @@ def collate_fn(examples):
         text += processor.tokenizer.eos_token
         texts.append(text)
 
-        # Image(s)
+        # Image
         image_inputs = process_vision_info(messages)
         images.append(image_inputs)
 
@@ -153,7 +153,6 @@ def collate_fn(examples):
 
     batch["labels"] = labels
 
-    #print(visualize_masking(batch, processor))
     return batch
 
 train_dataloader = DataLoader(
@@ -177,15 +176,19 @@ peft_config = LoraConfig(
     bias="none",
     target_modules=[
         "q_proj",
-        #"k_proj",
         "v_proj",
-        #"o_proj",
-        #"gate_proj",
-        #"up_proj",
-        #"down_proj"],
     ],
     task_type="CAUSAL_LM"
 )
+
+# Gemma 3 modules:
+#       "q_proj",
+#       "k_proj",
+#       "v_proj",
+#       "o_proj",
+#       "gate_proj",
+#       "up_proj",
+#       "down_proj"
 
 model = get_peft_model(model, peft_config)
 
@@ -193,8 +196,8 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 100
-num_warmup_steps = int(0.05 * max_steps)
+max_steps = 2001
+num_warmup_steps = int(0.02 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
 val_every = 25  # run validation every N steps
