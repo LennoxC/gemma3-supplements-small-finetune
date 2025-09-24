@@ -21,7 +21,7 @@ save_dir = "finetunes"
 experiment_name = os.getenv("TEST_RUN_NAME")
 if experiment_name is None:
     raise ValueError("Environment variable TEST_RUN_NAME must be set!")
-model_path = os.path.join(save_dir, experiment_name)
+model_path = os.path.join(save_dir, experiment_name, "best")
 
 dataset_path = os.path.join(data_dir, "output_cleaned.jsonl")
 

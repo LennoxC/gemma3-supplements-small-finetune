@@ -196,12 +196,11 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-#max_steps = 2001
-max_steps = 40
+max_steps = 2001
 num_warmup_steps = int(0.02 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
-val_every = 4  # run validation every N steps
+val_every = 50  # run validation every N steps
 max_grad_norm = 1.0
 
 optimizer = torch.optim.AdamW(model.parameters())
@@ -282,7 +281,7 @@ while global_step < max_steps:
                 model.train()  # switch back
 
             # ---- Regular checkpointing every 200 steps ----
-            if global_step % 10 == 0:
+            if global_step % 200 == 0:
                 accelerator.wait_for_everyone()
                 ckpt_dir = f"{save_dir}/{run_name}/checkpoint-{global_step}"
                 with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
