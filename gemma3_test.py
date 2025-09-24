@@ -125,7 +125,7 @@ loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 test_loss, total_samples = 0, 0
 
 global_batches = 0
-eval_limit = 1
+eval_limit = 50
 
 with torch.no_grad():
     for batch in tqdm(test_dataloader, desc="Evaluating"):

@@ -196,11 +196,12 @@ model.print_trainable_parameters()
 
 # ================ Training Loop ================
 # Params:
-max_steps = 2001
+#max_steps = 2001
+max_steps = 40
 num_warmup_steps = int(0.02 * max_steps)
 gradient_accumulation_steps = 8
 log_every = 2  # steps for scalar logging
-val_every = 25  # run validation every N steps
+val_every = 4  # run validation every N steps
 max_grad_norm = 1.0
 
 optimizer = torch.optim.AdamW(model.parameters())
@@ -220,6 +221,9 @@ model, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.p
 model.train()
 
 global_step = 0
+best_val_loss = float("inf")
+steps_since_improvement = 0
+
 while global_step < max_steps:
     for step, batch in enumerate(train_dataloader):
         outputs = model(**batch)
@@ -243,35 +247,64 @@ while global_step < max_steps:
             # ---- Validation Mid-Epoch ----
             if global_step % val_every == 0:
                 model.eval()
-                val_loss, val_correct, val_total = 0, 0, 0
+                val_loss = 0.0
 
                 with torch.no_grad():
                     for val_batch in val_dataloader:
                         outputs = model(**val_batch)
-                        batch_loss = outputs.loss if hasattr(outputs, "loss") else loss_fn(outputs.logits, val_batch["labels"])
+                        batch_loss = outputs.loss
                         val_loss += batch_loss.item()
 
                 avg_val_loss = val_loss / len(val_dataloader)
-
                 writer.add_scalar("eval/loss", avg_val_loss, global_step)
 
+                # --- Track best model ---
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    steps_since_improvement = 0
+
+                    # save best model
+                    accelerator.wait_for_everyone()
+                    output_dir = f"{save_dir}/{run_name}/best"
+                    with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
+                        if accelerator.is_main_process:
+                            model.save_pretrained(output_dir)
+                            tokenizer.save_pretrained(output_dir)
+                            processor.save_pretrained(output_dir)
+                else:
+                    steps_since_improvement += val_every
+
+                # --- Early stopping ---
+                if steps_since_improvement >= 500:
+                    print(f"Early stopping at step {global_step}. Best val loss: {best_val_loss:.4f}")
+                    break
+
                 model.train()  # switch back
+
+            # ---- Regular checkpointing every 200 steps ----
+            if global_step % 10 == 0:
+                accelerator.wait_for_everyone()
+                ckpt_dir = f"{save_dir}/{run_name}/checkpoint-{global_step}"
+                with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
+                    if accelerator.is_main_process:
+                        model.save_pretrained(ckpt_dir)
+                        tokenizer.save_pretrained(ckpt_dir)
+                        processor.save_pretrained(ckpt_dir)
 
             if global_step >= max_steps:
                 break
 
+    # Early stopping outer break
+    if steps_since_improvement >= 500 or global_step >= max_steps:
+        break
 
-# ============ SAVE THE MODEL ============
+# ============ SAVE FINAL MODEL ============
 accelerator.wait_for_everyone()
-
-output_dir = f"{save_dir}/{run_name}"
-
-with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)): # required to prevent empty LoRA layers being saved
+final_dir = f"{save_dir}/{run_name}/final"
+with deepspeed.zero.GatheredParameters((p for n, p in model.named_parameters() if "lora" in n)):
     if accelerator.is_main_process:
-        model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
-        processor.save_pretrained(output_dir)
-
+        model.save_pretrained(final_dir)
+        tokenizer.save_pretrained(final_dir)
+        processor.save_pretrained(final_dir)
 
 writer.close()
-
